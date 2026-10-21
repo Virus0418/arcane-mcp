@@ -1,6 +1,6 @@
 import pytest
 
-from arcane_mcp.config import DEFAULT_TAGS, ConfigError, load_settings
+from arcane_mcp.config import DEFAULT_OAUTH_SCOPES, DEFAULT_TAGS, ConfigError, load_settings
 
 REQUIRED = {
     "ARCANE_BASE_URL": "https://arcane.example.com/",
@@ -8,12 +8,23 @@ REQUIRED = {
     "MCP_AUTH_TOKEN": "secret",
 }
 
+OAUTH_REQUIRED = {
+    "ARCANE_BASE_URL": "https://arcane.example.com/",
+    "ARCANE_API_KEY": "arc_key",
+    "MCP_AUTH_MODE": "oauth",
+    "MCP_PUBLIC_BASE_URL": "https://mcp.example.com",
+    "OAUTH_ISSUER_URL": "https://tenant.logto.app/oidc",
+}
+
 
 def test_defaults():
     s = load_settings(REQUIRED)
     assert s.arcane_base_url == "https://arcane.example.com"
     assert s.arcane_api_key == "arc_key"
+    assert s.mcp_auth_mode == "bearer"
     assert s.mcp_auth_token == "secret"
+    assert s.mcp_public_base_url is None
+    assert s.oauth_issuer_url is None
     assert s.mcp_host == "0.0.0.0"
     assert s.mcp_port == 8000
     assert s.tags == DEFAULT_TAGS
@@ -81,3 +92,85 @@ def test_bad_bool_raises():
 def test_bad_port_raises():
     with pytest.raises(ConfigError):
         load_settings({**REQUIRED, "MCP_PORT": "abc"})
+
+
+def test_invalid_auth_mode_raises():
+    with pytest.raises(ConfigError, match="bearer"):
+        load_settings({**REQUIRED, "MCP_AUTH_MODE": "both"})
+
+
+def test_oauth_does_not_require_mcp_auth_token():
+    s = load_settings(OAUTH_REQUIRED)
+    assert s.mcp_auth_mode == "oauth"
+    assert s.mcp_auth_token is None
+    assert s.mcp_public_base_url == "https://mcp.example.com"
+    assert s.oauth_issuer_url == "https://tenant.logto.app/oidc"
+    assert s.oauth_audience == "https://mcp.example.com/mcp"
+    assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks"
+    assert s.oauth_scopes == DEFAULT_OAUTH_SCOPES
+
+
+def test_oauth_ignores_unused_bearer_token():
+    s = load_settings({**OAUTH_REQUIRED, "MCP_AUTH_TOKEN": "ignored"})
+    assert s.mcp_auth_token is None
+
+
+def test_oauth_alias_env_names():
+    s = load_settings({
+        "ARCANE_BASE_URL": "https://arcane.example.com",
+        "ARCANE_API_KEY": "arc_key",
+        "ARCANE_MCP_AUTH_MODE": "oauth",
+        "FASTMCP_SERVER_AUTH_BASE_URL": "https://mcp.example.com/",
+        "MCP_OAUTH_ISSUER_URL": "https://tenant.logto.app",
+        "MCP_OAUTH_AUDIENCE": "https://mcp.example.com/mcp/",
+        "MCP_OAUTH_SCOPES": "mcp, offline_access",
+        "MCP_OAUTH_JWKS_URI": "https://tenant.logto.app/oidc/jwks",
+    })
+    assert s.mcp_auth_mode == "oauth"
+    assert s.mcp_public_base_url == "https://mcp.example.com"
+    assert s.oauth_issuer_url == "https://tenant.logto.app/oidc"
+    assert s.oauth_audience == "https://mcp.example.com/mcp/"
+    assert s.oauth_scopes == ("mcp", "offline_access")
+    assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks"
+
+
+def test_oauth_appends_oidc_suffix():
+    s = load_settings({**OAUTH_REQUIRED, "OAUTH_ISSUER_URL": "https://tenant.logto.app/"})
+    assert s.oauth_issuer_url == "https://tenant.logto.app/oidc"
+    assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks"
+
+
+def test_oauth_explicit_audience_and_scopes():
+    s = load_settings({
+        **OAUTH_REQUIRED,
+        "OAUTH_AUDIENCE": "https://mcp.example.com/",
+        "OAUTH_SCOPES": "mcp",
+        "OAUTH_JWKS_URI": "https://tenant.logto.app/oidc/jwks.json",
+    })
+    assert s.oauth_audience == "https://mcp.example.com/"
+    assert s.oauth_scopes == ("mcp",)
+    assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks.json"
+
+
+def test_oauth_empty_scopes_disables_required_scopes():
+    s = load_settings({**OAUTH_REQUIRED, "OAUTH_SCOPES": ""})
+    assert s.oauth_scopes == ()
+
+
+@pytest.mark.parametrize("missing", ["MCP_PUBLIC_BASE_URL", "OAUTH_ISSUER_URL"])
+def test_oauth_missing_required(missing):
+    env = {k: v for k, v in OAUTH_REQUIRED.items() if k != missing}
+    with pytest.raises(ConfigError) as exc:
+        load_settings(env)
+    assert missing in str(exc.value)
+
+
+def test_oauth_rejects_non_url():
+    with pytest.raises(ConfigError, match="http"):
+        load_settings({**OAUTH_REQUIRED, "MCP_PUBLIC_BASE_URL": "mcp.example.com"})
+
+
+def test_bearer_still_requires_token_when_mode_set():
+    env = {k: v for k, v in REQUIRED.items() if k != "MCP_AUTH_TOKEN"}
+    with pytest.raises(ConfigError, match="MCP_AUTH_TOKEN"):
+        load_settings({**env, "MCP_AUTH_MODE": "bearer"})

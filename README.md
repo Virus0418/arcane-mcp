@@ -52,6 +52,8 @@ claude mcp add --transport http arcane http://<host>:8000/mcp --header "Authoriz
 
 Any other MCP client: Streamable HTTP endpoint `http://<host>:8000/mcp`, header `Authorization: Bearer <MCP_AUTH_TOKEN>`.
 
+ChatGPT and other OAuth MCP clients should use **oauth** mode (below) instead of a static bearer header.
+
 ## How it works
 
 1. On boot the server fetches `ARCANE_BASE_URL/api/openapi.json`, retrying for `ARCANE_MCP_SPEC_TIMEOUT` seconds and exiting non-zero if Arcane never answers (Docker restarts it).
@@ -72,13 +74,46 @@ do not execute on the first call. They return:
 The client must then call `confirm_operation(token)`. Tokens are single-use and expire after 120 seconds.
 Disable with `ARCANE_MCP_CONFIRM_DESTRUCTIVE=false`; add patterns with `ARCANE_MCP_DESTRUCTIVE_PATTERNS`.
 
+## Authentication
+
+MCP ingress auth is separate from Arcane API auth (`ARCANE_BASE_URL` + `ARCANE_API_KEY`). Pick **one** mode per process with `MCP_AUTH_MODE` (alias `ARCANE_MCP_AUTH_MODE`):
+
+- **`bearer`** (default): static token via FastMCP `StaticTokenVerifier`. Requires `MCP_AUTH_TOKEN`. Clients send `Authorization: Bearer <MCP_AUTH_TOKEN>`.
+- **`oauth`**: JWT access tokens from Logto via FastMCP `JWTVerifier` + `RemoteAuthProvider`. Does **not** require `MCP_AUTH_TOKEN`. Unauthenticated `/mcp` returns **401** with `WWW-Authenticate` pointing at OAuth Protected Resource Metadata (PRM) so ChatGPT can discover Logto OIDC (CIMD).
+
+Do not mix bearer and oauth on the same process or `/mcp` endpoint. Run two instances if you have both kinds of clients.
+
+### OAuth (Logto / ChatGPT)
+
+In Logto, create an **API Resource** whose indicator matches `OAUTH_AUDIENCE` (default `{MCP_PUBLIC_BASE_URL}/mcp`), enable **CIMD / dynamic apps** on the tenant, and issue access tokens for that resource with the `mcp` scope (or `OAUTH_SCOPES`). JWKS is `{OAUTH_ISSUER_URL}/jwks`.
+
+```bash
+docker run -d --name arcane-mcp --restart unless-stopped -p 8000:8000 \
+  -e ARCANE_BASE_URL=https://arcane.example.com \
+  -e ARCANE_API_KEY=arc_xxx \
+  -e MCP_AUTH_MODE=oauth \
+  -e MCP_PUBLIC_BASE_URL=https://mcp.example.com \
+  -e OAUTH_ISSUER_URL=https://your-tenant.logto.app/oidc \
+  -e OAUTH_AUDIENCE=https://mcp.example.com/mcp \
+  -e OAUTH_SCOPES=mcp \
+  ghcr.io/lukeeexd/arcane-mcp:latest
+```
+
+Point ChatGPT at `https://mcp.example.com/mcp`. It should receive 401 + PRM at `/.well-known/oauth-protected-resource/mcp`, then complete OIDC against Logto. `GET /health` stays unauthenticated in both modes.
+
 ## Configuration
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `ARCANE_BASE_URL` | yes | | Arcane URL without `/api` |
-| `ARCANE_API_KEY` | yes | | Arcane API key |
-| `MCP_AUTH_TOKEN` | yes | | Bearer token clients must present |
+| `ARCANE_API_KEY` | yes | | Arcane API key (sent as `X-API-Key`; not MCP ingress) |
+| `MCP_AUTH_MODE` | no | `bearer` | `bearer` or `oauth` (alias `ARCANE_MCP_AUTH_MODE`) |
+| `MCP_AUTH_TOKEN` | bearer | | Static bearer token clients must present |
+| `MCP_PUBLIC_BASE_URL` | oauth | | Public origin of this MCP (no `/mcp`). Alias `FASTMCP_SERVER_AUTH_BASE_URL` |
+| `OAUTH_ISSUER_URL` | oauth | | Logto OIDC issuer ending in `/oidc` (`/oidc` is appended if missing) |
+| `OAUTH_AUDIENCE` | oauth | `{MCP_PUBLIC_BASE_URL}/mcp` | JWT `aud` / Logto API Resource indicator |
+| `OAUTH_SCOPES` | no | `mcp` | Required token scopes (comma-separated) |
+| `OAUTH_JWKS_URI` | no | `{issuer}/jwks` | JWKS override |
 | `MCP_HOST` | no | `0.0.0.0` | Bind address |
 | `MCP_PORT` | no | `8000` | Bind port |
 | `ARCANE_MCP_TAGS` | no | see `.env.example` | OpenAPI tags to expose |
@@ -101,7 +136,8 @@ Diagnostics, JobSchedules, Jobs, Uploads, Mobile Push, Application Images, Strea
 
 Intended for a LAN or an internal Docker network. If you expose it publicly, put TLS in front of it,
 keep the confirmation gate on, and consider `ARCANE_MCP_READ_ONLY=true` or a narrower tag list.
-`GET /health` is unauthenticated and reports only the tool count and Arcane URL.
+`GET /health` is unauthenticated and reports only the tool count and Arcane URL. Public oauth mode
+needs a reachable `MCP_PUBLIC_BASE_URL` so clients can complete Logto discovery.
 
 ## Development
 
