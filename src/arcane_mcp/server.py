@@ -10,8 +10,10 @@ from typing import Any
 
 import httpx2
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from fastmcp.server.auth import AuthProvider, RemoteAuthProvider
+from fastmcp.server.auth.providers.jwt import JWTVerifier, StaticTokenVerifier
 from fastmcp.server.providers.openapi import OpenAPIProvider
+from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -37,7 +39,51 @@ def make_arcane_client(settings: Settings) -> httpx2.AsyncClient:
     )
 
 
-def build_server(settings: Settings, spec: dict[str, Any], client: httpx2.AsyncClient, *, auth: bool = True) -> FastMCP:
+def make_auth_provider(settings: Settings) -> AuthProvider:
+    """Build MCP ingress auth. Arcane API auth (ARCANE_API_KEY) is separate."""
+    if settings.mcp_auth_mode == "oauth":
+        issuer = settings.oauth_issuer_url
+        audience = settings.oauth_audience
+        jwks_uri = settings.oauth_jwks_uri
+        public_base = settings.mcp_public_base_url
+        if not issuer or not audience or not jwks_uri or not public_base:
+            raise ConfigError("oauth mode is missing issuer, audience, JWKS URI, or public base URL")
+        scopes = list(settings.oauth_scopes)
+        verifier = JWTVerifier(
+            jwks_uri=jwks_uri,
+            issuer=issuer,
+            audience=audience,
+            required_scopes=scopes or None,
+        )
+        logger.info(
+            "OAuth auth: issuer=%s audience=%s jwks=%s scopes=%s",
+            issuer,
+            audience,
+            jwks_uri,
+            ",".join(scopes) if scopes else "(none)",
+        )
+        return RemoteAuthProvider(
+            token_verifier=verifier,
+            authorization_servers=[AnyHttpUrl(issuer)],
+            base_url=public_base,
+            scopes_supported=scopes or None,
+            resource_name="arcane",
+        )
+
+    if not settings.mcp_auth_token:
+        raise ConfigError("MCP_AUTH_TOKEN is required in bearer mode")
+    return StaticTokenVerifier(
+        tokens={settings.mcp_auth_token: {"client_id": "arcane-mcp-client", "scopes": []}}
+    )
+
+
+def build_server(
+    settings: Settings,
+    spec: dict[str, Any],
+    client: httpx2.AsyncClient,
+    *,
+    auth: bool | AuthProvider = True,
+) -> FastMCP:
     normalised = normalise_spec(spec, settings.arcane_base_url)
     provider = OpenAPIProvider(
         normalised,
@@ -55,17 +101,18 @@ def build_server(settings: Settings, spec: dict[str, Any], client: httpx2.AsyncC
         middleware.append(ConfirmationMiddleware(store, destructive))
         logger.info("Confirmation gate active for %d destructive tools", len(destructive))
 
-    verifier = (
-        StaticTokenVerifier(tokens={settings.mcp_auth_token: {"client_id": "arcane-mcp-client", "scopes": []}})
-        if auth
-        else None
-    )
+    if auth is True:
+        auth_provider: AuthProvider | None = make_auth_provider(settings)
+    elif auth is False:
+        auth_provider = None
+    else:
+        auth_provider = auth
 
     mcp = FastMCP(
         "arcane",
         instructions=INSTRUCTIONS,
         version=__version__,
-        auth=verifier,
+        auth=auth_provider,
         middleware=middleware,
         providers=[provider],
     )
