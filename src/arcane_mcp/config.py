@@ -14,6 +14,16 @@ DEFAULT_TAGS: frozenset[str] = frozenset({
 })
 
 DEFAULT_OAUTH_SCOPES: tuple[str, ...] = ("mcp",)
+DEFAULT_OAUTH_JWT_ALGORITHM = "auto"
+DEFAULT_OAUTH_JWT_ALGORITHM_FALLBACK = "ES384"
+
+SUPPORTED_OAUTH_JWT_ALGORITHMS: frozenset[str] = frozenset({
+    "HS256", "HS384", "HS512",
+    "RS256", "RS384", "RS512",
+    "ES256", "ES384", "ES512",
+    "PS256", "PS384", "PS512",
+    "EdDSA", "Ed25519", "Ed448",
+})
 
 DEFAULT_OAUTH_HTTP_ALLOWED_ORIGINS: tuple[str, ...] = (
     "https://chatgpt.com",
@@ -42,6 +52,7 @@ class Settings:
     oauth_audience: str | None = None
     oauth_jwks_uri: str | None = None
     oauth_scopes: tuple[str, ...] = DEFAULT_OAUTH_SCOPES
+    oauth_jwt_algorithm: str = DEFAULT_OAUTH_JWT_ALGORITHM
     mcp_http_allowed_origins: tuple[str, ...] = ()
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
@@ -160,6 +171,23 @@ def _http_allowed_origins(env: Mapping[str, str], mode: AuthMode) -> tuple[str, 
     return ()
 
 
+def _oauth_jwt_algorithm(env: Mapping[str, str]) -> str:
+    raw = _env(env, "OAUTH_JWT_ALGORITHM", "MCP_OAUTH_JWT_ALGORITHM")
+    if not raw or raw.lower() == "auto":
+        return DEFAULT_OAUTH_JWT_ALGORITHM
+    lowered = raw.lower()
+    ed_algs = {"eddsa": "EdDSA", "ed25519": "Ed25519", "ed448": "Ed448"}
+    if lowered in ed_algs:
+        return ed_algs[lowered]
+    algorithm = raw.upper()
+    if algorithm not in SUPPORTED_OAUTH_JWT_ALGORITHMS:
+        raise ConfigError(
+            f"OAUTH_JWT_ALGORITHM must be 'auto' or one of {', '.join(sorted(SUPPORTED_OAUTH_JWT_ALGORITHMS))}, "
+            f"got {raw!r}"
+        )
+    return algorithm
+
+
 def _oauth_scopes(env: Mapping[str, str]) -> tuple[str, ...]:
     for name in ("OAUTH_SCOPES", "MCP_OAUTH_SCOPES"):
         if name in env:
@@ -191,6 +219,7 @@ def _load_oauth_settings(env: Mapping[str, str]) -> dict[str, object]:
         "oauth_audience": audience,
         "oauth_jwks_uri": jwks_uri,
         "oauth_scopes": _oauth_scopes(env),
+        "oauth_jwt_algorithm": _oauth_jwt_algorithm(env),
     }
 
 
@@ -207,6 +236,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             "oauth_audience": None,
             "oauth_jwks_uri": None,
             "oauth_scopes": DEFAULT_OAUTH_SCOPES,
+            "oauth_jwt_algorithm": DEFAULT_OAUTH_JWT_ALGORITHM,
         }
     return Settings(
         arcane_base_url=_base_url(_required(env, "ARCANE_BASE_URL")),

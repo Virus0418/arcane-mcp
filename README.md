@@ -85,7 +85,7 @@ Do not mix bearer and oauth on the same process or `/mcp` endpoint. Run two inst
 
 ### OAuth (Logto / ChatGPT)
 
-In Logto, create an **API Resource** whose indicator matches `OAUTH_AUDIENCE` (default `{MCP_PUBLIC_BASE_URL}/mcp`), enable **CIMD / dynamic apps** on the tenant, and issue access tokens for that resource with the `mcp` scope (or `OAUTH_SCOPES`). JWKS is `{OAUTH_ISSUER_URL}/jwks`.
+In Logto, create an **API Resource** whose indicator matches `OAUTH_AUDIENCE` (default `{MCP_PUBLIC_BASE_URL}/mcp`), enable **CIMD / dynamic apps** on the tenant, and issue access tokens for that resource with the `mcp` scope (or `OAUTH_SCOPES`). JWKS is `{OAUTH_ISSUER_URL}/jwks`. Logto signs access tokens with **ES384** (EC P-384); `OAUTH_JWT_ALGORITHM` defaults to `auto`, which reads that `alg` from JWKS at startup (fallback `ES384` if JWKS is unreachable). FastMCP's `JWTVerifier` otherwise defaults to RS256 and skips the EC key, which yields `401 invalid_token`.
 
 ```bash
 docker run -d --name arcane-mcp --restart unless-stopped -p 8000:8000 \
@@ -116,6 +116,7 @@ Browser clients (ChatGPT) send a CORS preflight `OPTIONS /mcp`. In oauth mode th
 | `OAUTH_AUDIENCE` | oauth | `{MCP_PUBLIC_BASE_URL}/mcp` | JWT `aud` / Logto API Resource indicator |
 | `OAUTH_SCOPES` | no | `mcp` | Required token scopes (comma-separated) |
 | `OAUTH_JWKS_URI` | no | `{issuer}/jwks` | JWKS override |
+| `OAUTH_JWT_ALGORITHM` | no | `auto` | JWT alg for `JWTVerifier` (`auto` reads JWKS, Logto fallback `ES384`). Alias `MCP_OAUTH_JWT_ALGORITHM` |
 | `MCP_HTTP_ALLOWED_ORIGINS` | no | ChatGPT origins in oauth; empty in bearer | Comma-separated browser origins for CORS on `/mcp` (alias `ARCANE_MCP_HTTP_ALLOWED_ORIGINS`). Empty disables CORS. Prefer an explicit list over `*` |
 | `MCP_HOST` | no | `0.0.0.0` | Bind address |
 | `MCP_PORT` | no | `8000` | Bind port |

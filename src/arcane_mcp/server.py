@@ -21,7 +21,12 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from arcane_mcp import __version__
-from arcane_mcp.config import ConfigError, Settings, load_settings
+from arcane_mcp.config import (
+    DEFAULT_OAUTH_JWT_ALGORITHM_FALLBACK,
+    ConfigError,
+    Settings,
+    load_settings,
+)
 from arcane_mcp.safety import ConfirmationMiddleware, ConfirmationStore, destructive_tool_names, register_confirm_tool
 from arcane_mcp.spec import SpecFetchError, build_component_fn, build_route_map_fn, fetch_spec, normalise_spec
 
@@ -56,7 +61,134 @@ def make_arcane_client(settings: Settings) -> httpx2.AsyncClient:
     )
 
 
-def make_auth_provider(settings: Settings) -> AuthProvider:
+_EC_ALG_CURVE = {"ES256": "P-256", "ES384": "P-384", "ES512": "P-521"}
+_CURVE_EC_ALG = {curve: alg for alg, curve in _EC_ALG_CURVE.items()}
+
+
+def fetch_jwks(jwks_uri: str, *, client: httpx2.Client | None = None) -> dict[str, Any]:
+    close = client is None
+    http = client or httpx2.Client(timeout=5.0)
+    try:
+        response = http.get(jwks_uri)
+        response.raise_for_status()
+        data = response.json()
+    finally:
+        if close:
+            http.close()
+    if not isinstance(data, dict):
+        raise ValueError("JWKS response must be a JSON object")
+    return data
+
+
+def _jwk_algorithm(key: dict[str, Any]) -> str | None:
+    if key.get("use") == "enc":
+        return None
+    alg = key.get("alg")
+    if isinstance(alg, str) and alg.strip():
+        return alg.strip()
+    kty = key.get("kty")
+    if kty == "RSA":
+        return "RS256"
+    if kty == "EC":
+        return _CURVE_EC_ALG.get(str(key.get("crv") or ""))
+    if kty == "OKP":
+        crv = key.get("crv")
+        if crv == "Ed25519":
+            return "Ed25519"
+        if crv == "Ed448":
+            return "Ed448"
+    return None
+
+
+def algorithm_from_jwks(jwks: dict[str, Any]) -> str | None:
+    keys = jwks.get("keys")
+    if not isinstance(keys, list):
+        return None
+    for key in keys:
+        if isinstance(key, dict):
+            alg = _jwk_algorithm(key)
+            if alg:
+                return alg
+    return None
+
+
+def _kty_for_algorithm(algorithm: str) -> str | None:
+    if algorithm.startswith(("RS", "PS")):
+        return "RSA"
+    if algorithm.startswith("ES"):
+        return "EC"
+    if algorithm.startswith("HS"):
+        return "oct"
+    if algorithm in {"EdDSA", "Ed25519", "Ed448"}:
+        return "OKP"
+    return None
+
+
+def jwks_supports_algorithm(jwks: dict[str, Any], algorithm: str) -> bool:
+    keys = jwks.get("keys")
+    if not isinstance(keys, list):
+        return False
+    expected_kty = _kty_for_algorithm(algorithm)
+    expected_crv = _EC_ALG_CURVE.get(algorithm)
+    for key in keys:
+        if not isinstance(key, dict) or key.get("use") == "enc":
+            continue
+        if key.get("alg") and key["alg"] != algorithm:
+            continue
+        if expected_kty and key.get("kty") != expected_kty:
+            continue
+        if expected_crv and key.get("crv") not in {None, expected_crv}:
+            continue
+        if key.get("kty") or key.get("alg"):
+            return True
+    return False
+
+
+def resolve_oauth_jwt_algorithm(
+    settings: Settings,
+    *,
+    jwks_client: httpx2.Client | None = None,
+) -> str:
+    """Resolve JWTVerifier algorithm. `auto` reads JWKS; Logto fallback is ES384."""
+    jwks_uri = settings.oauth_jwks_uri
+    configured = settings.oauth_jwt_algorithm or "auto"
+    jwks: dict[str, Any] | None = None
+    if jwks_uri:
+        try:
+            jwks = fetch_jwks(jwks_uri, client=jwks_client)
+        except Exception as exc:
+            logger.warning("Failed to fetch JWKS from %s: %s", jwks_uri, exc)
+
+    if configured == "auto":
+        picked = algorithm_from_jwks(jwks) if jwks is not None else None
+        algorithm = picked or DEFAULT_OAUTH_JWT_ALGORITHM_FALLBACK
+        if picked:
+            logger.info("OAuth JWT algorithm auto-detected from JWKS: %s", algorithm)
+        else:
+            logger.warning(
+                "OAuth JWT algorithm auto-detect failed; falling back to %s",
+                algorithm,
+            )
+    else:
+        algorithm = configured
+
+    keys = jwks.get("keys") if isinstance(jwks, dict) else None
+    if isinstance(keys, list) and keys and not jwks_supports_algorithm(jwks or {}, algorithm):
+        logger.warning(
+            "JWKS at %s has %d keys but none match algorithm %s",
+            jwks_uri,
+            len(keys),
+            algorithm,
+        )
+    return algorithm
+
+
+def make_auth_provider(
+    settings: Settings,
+    *,
+    jwks_client: httpx2.Client | None = None,
+    token_http_client: httpx2.AsyncClient | None = None,
+) -> AuthProvider:
     """Build MCP ingress auth. Arcane API auth (ARCANE_API_KEY) is separate."""
     if settings.mcp_auth_mode == "oauth":
         issuer = settings.oauth_issuer_url
@@ -66,18 +198,22 @@ def make_auth_provider(settings: Settings) -> AuthProvider:
         if not issuer or not audience or not jwks_uri or not public_base:
             raise ConfigError("oauth mode is missing issuer, audience, JWKS URI, or public base URL")
         scopes = list(settings.oauth_scopes)
+        algorithm = resolve_oauth_jwt_algorithm(settings, jwks_client=jwks_client)
         verifier = JWTVerifier(
             jwks_uri=jwks_uri,
             issuer=issuer,
             audience=audience,
+            algorithm=algorithm,
             required_scopes=scopes or None,
+            http_client=token_http_client,
         )
         logger.info(
-            "OAuth auth: issuer=%s audience=%s jwks=%s scopes=%s",
+            "OAuth auth: issuer=%s audience=%s jwks=%s scopes=%s algorithm=%s",
             issuer,
             audience,
             jwks_uri,
             ",".join(scopes) if scopes else "(none)",
+            algorithm,
         )
         return RemoteAuthProvider(
             token_verifier=verifier,
