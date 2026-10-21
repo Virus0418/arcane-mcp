@@ -15,6 +15,12 @@ DEFAULT_TAGS: frozenset[str] = frozenset({
 
 DEFAULT_OAUTH_SCOPES: tuple[str, ...] = ("mcp",)
 
+DEFAULT_OAUTH_HTTP_ALLOWED_ORIGINS: tuple[str, ...] = (
+    "https://chatgpt.com",
+    "https://chat.openai.com",
+    "https://www.chatgpt.com",
+)
+
 AuthMode = Literal["bearer", "oauth"]
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -36,6 +42,7 @@ class Settings:
     oauth_audience: str | None = None
     oauth_jwks_uri: str | None = None
     oauth_scopes: tuple[str, ...] = DEFAULT_OAUTH_SCOPES
+    mcp_http_allowed_origins: tuple[str, ...] = ()
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
     tags: frozenset[str] = DEFAULT_TAGS
@@ -127,6 +134,32 @@ def _oauth_issuer_url(raw: str, name: str) -> str:
     return url
 
 
+def _origin(raw: str, name: str) -> str:
+    origin = raw.strip().rstrip("/")
+    if origin == "*":
+        return origin
+    parsed = urlparse(origin)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigError(f"{name} entries must be http(s) origins (or '*'), got {raw!r}")
+    return origin
+
+
+def _http_allowed_origins(env: Mapping[str, str], mode: AuthMode) -> tuple[str, ...]:
+    for name in ("MCP_HTTP_ALLOWED_ORIGINS", "ARCANE_MCP_HTTP_ALLOWED_ORIGINS"):
+        if name in env:
+            return tuple(_origin(part, name) for part in _csv(env, name))
+    if mode == "oauth":
+        return DEFAULT_OAUTH_HTTP_ALLOWED_ORIGINS
+    return ()
+
+
 def _oauth_scopes(env: Mapping[str, str]) -> tuple[str, ...]:
     for name in ("OAUTH_SCOPES", "MCP_OAUTH_SCOPES"):
         if name in env:
@@ -188,5 +221,6 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         destructive_patterns=_csv(env, "ARCANE_MCP_DESTRUCTIVE_PATTERNS"),
         spec_timeout=float(_number(env, "ARCANE_MCP_SPEC_TIMEOUT", 60.0, float)),
         log_level=(env.get("ARCANE_MCP_LOG_LEVEL", "").strip() or "INFO").upper(),
+        mcp_http_allowed_origins=_http_allowed_origins(env, mode),
         **auth_fields,
     )

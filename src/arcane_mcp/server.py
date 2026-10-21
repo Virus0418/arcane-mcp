@@ -9,13 +9,16 @@ import sys
 from typing import Any
 
 import httpx2
+import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider, RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier, StaticTokenVerifier
 from fastmcp.server.providers.openapi import OpenAPIProvider
 from pydantic import AnyHttpUrl
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp
 
 from arcane_mcp import __version__
 from arcane_mcp.config import ConfigError, Settings, load_settings
@@ -29,6 +32,20 @@ INSTRUCTIONS = (
     'environment "0" and remote agents have UUIDs (see list_environments). Destructive tools return '
     "requires_confirmation=true with a token instead of executing; call confirm_operation(token) to proceed."
 )
+
+MCP_HTTP_PATH = "/mcp"
+CORS_ALLOW_METHODS = ("GET", "POST", "DELETE", "OPTIONS")
+CORS_ALLOW_HEADERS = (
+    "Accept",
+    "Authorization",
+    "Content-Type",
+    "Last-Event-ID",
+    "mcp-protocol-version",
+    "mcp-session-id",
+    "Mcp-Method",
+    "Mcp-Name",
+)
+CORS_EXPOSE_HEADERS = ("mcp-session-id",)
 
 
 def make_arcane_client(settings: Settings) -> httpx2.AsyncClient:
@@ -129,6 +146,35 @@ def build_server(
     return mcp
 
 
+def build_http_app(mcp: FastMCP, settings: Settings) -> ASGIApp:
+    """Streamable HTTP ASGI app at /mcp, with CORS outside auth so preflight and 401s get ACAO."""
+    origins = list(settings.mcp_http_allowed_origins)
+    app = mcp.http_app(
+        path=MCP_HTTP_PATH,
+        allowed_origins=origins or None,
+    )
+    if not origins:
+        return app
+    logger.info("CORS allowed origins: %s", ",".join(origins))
+    # Wrap after construction so CORS is outermost: OPTIONS never hits the /mcp
+    # route (GET/POST/DELETE only → 405), and 401s still include ACAO.
+    return CORSMiddleware(
+        app,
+        allow_origins=origins,
+        allow_methods=list(CORS_ALLOW_METHODS),
+        allow_headers=list(CORS_ALLOW_HEADERS),
+        expose_headers=list(CORS_EXPOSE_HEADERS),
+    )
+
+
+def _starlette_app(app: ASGIApp) -> ASGIApp:
+    """Unwrap CORSMiddleware to reach the FastMCP Starlette app (lifespan, router)."""
+    inner = app
+    while isinstance(inner, CORSMiddleware):
+        inner = inner.app
+    return inner
+
+
 async def build_server_from_live_spec(settings: Settings) -> FastMCP:
     client = make_arcane_client(settings)
     spec = await fetch_spec(client, timeout=settings.spec_timeout)
@@ -149,8 +195,11 @@ def main() -> None:
         logger.error("%s", exc)
         sys.exit(1)
     tool_count = len(asyncio.run(mcp.list_tools(run_middleware=False)))
-    logger.info("Serving %d tools on http://%s:%d/mcp", tool_count, settings.mcp_host, settings.mcp_port)
-    mcp.run(transport="http", host=settings.mcp_host, port=settings.mcp_port, path="/mcp", show_banner=False)
+    logger.info("Serving %d tools on http://%s:%d%s", tool_count, settings.mcp_host, settings.mcp_port, MCP_HTTP_PATH)
+    # mcp.run() can pass Starlette middleware, but that lands inside auth/routing so
+    # OPTIONS /mcp still 405s without ACAO. Wrap http_app() instead and serve with uvicorn.
+    app = build_http_app(mcp, settings)
+    uvicorn.run(app, host=settings.mcp_host, port=settings.mcp_port, log_level=settings.log_level.lower())
 
 
 if __name__ == "__main__":
