@@ -165,13 +165,15 @@ def test_make_auth_provider_bearer():
 
 def test_make_auth_provider_oauth_uses_jwt_and_prm():
     settings = load_settings(OAUTH_ENV)
-    auth = make_auth_provider(settings)
+    with httpx2.Client(transport=httpx2.MockTransport(lambda req: httpx2.Response(404))) as jwks_client:
+        auth = make_auth_provider(settings, jwks_client=jwks_client)
     assert isinstance(auth, RemoteAuthProvider)
     assert isinstance(auth.token_verifier, JWTVerifier)
     assert auth.token_verifier.jwks_uri == "https://tenant.logto.app/oidc/jwks"
     assert auth.token_verifier.issuer == "https://tenant.logto.app/oidc"
     assert auth.token_verifier.audience == "https://mcp.example.com/mcp"
     assert auth.token_verifier.required_scopes == ["mcp"]
+    assert auth.token_verifier.algorithm == "ES384"
     assert [str(s).rstrip("/") for s in auth.authorization_servers] == ["https://tenant.logto.app/oidc"]
     assert str(auth.base_url).rstrip("/") == "https://mcp.example.com"
 

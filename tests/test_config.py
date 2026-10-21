@@ -115,6 +115,7 @@ def test_oauth_does_not_require_mcp_auth_token():
     assert s.oauth_audience == "https://mcp.example.com/mcp"
     assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks"
     assert s.oauth_scopes == DEFAULT_OAUTH_SCOPES
+    assert s.oauth_jwt_algorithm == "auto"
     assert s.mcp_http_allowed_origins == DEFAULT_OAUTH_HTTP_ALLOWED_ORIGINS
     assert "https://chatgpt.com" in s.mcp_http_allowed_origins
 
@@ -134,6 +135,7 @@ def test_oauth_alias_env_names():
         "MCP_OAUTH_AUDIENCE": "https://mcp.example.com/mcp/",
         "MCP_OAUTH_SCOPES": "mcp, offline_access",
         "MCP_OAUTH_JWKS_URI": "https://tenant.logto.app/oidc/jwks",
+        "MCP_OAUTH_JWT_ALGORITHM": "es384",
     })
     assert s.mcp_auth_mode == "oauth"
     assert s.mcp_public_base_url == "https://mcp.example.com"
@@ -141,6 +143,7 @@ def test_oauth_alias_env_names():
     assert s.oauth_audience == "https://mcp.example.com/mcp/"
     assert s.oauth_scopes == ("mcp", "offline_access")
     assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks"
+    assert s.oauth_jwt_algorithm == "ES384"
 
 
 def test_oauth_appends_oidc_suffix():
@@ -206,3 +209,14 @@ def test_oauth_empty_origins_disables_cors_default():
 def test_http_allowed_origins_rejects_path():
     with pytest.raises(ConfigError, match="origins"):
         load_settings({**REQUIRED, "MCP_HTTP_ALLOWED_ORIGINS": "https://chatgpt.com/mcp"})
+
+
+def test_oauth_jwt_algorithm_explicit_and_auto():
+    assert load_settings({**OAUTH_REQUIRED, "OAUTH_JWT_ALGORITHM": "ES384"}).oauth_jwt_algorithm == "ES384"
+    assert load_settings({**OAUTH_REQUIRED, "OAUTH_JWT_ALGORITHM": "rs256"}).oauth_jwt_algorithm == "RS256"
+    assert load_settings({**OAUTH_REQUIRED, "OAUTH_JWT_ALGORITHM": "auto"}).oauth_jwt_algorithm == "auto"
+
+
+def test_oauth_jwt_algorithm_rejects_unknown():
+    with pytest.raises(ConfigError, match="OAUTH_JWT_ALGORITHM"):
+        load_settings({**OAUTH_REQUIRED, "OAUTH_JWT_ALGORITHM": "HS1"})
