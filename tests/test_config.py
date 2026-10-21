@@ -1,6 +1,12 @@
 import pytest
 
-from arcane_mcp.config import DEFAULT_OAUTH_SCOPES, DEFAULT_TAGS, ConfigError, load_settings
+from arcane_mcp.config import (
+    DEFAULT_OAUTH_HTTP_ALLOWED_ORIGINS,
+    DEFAULT_OAUTH_SCOPES,
+    DEFAULT_TAGS,
+    ConfigError,
+    load_settings,
+)
 
 REQUIRED = {
     "ARCANE_BASE_URL": "https://arcane.example.com/",
@@ -35,6 +41,7 @@ def test_defaults():
     assert s.destructive_patterns == ()
     assert s.spec_timeout == 60.0
     assert s.log_level == "INFO"
+    assert s.mcp_http_allowed_origins == ()
 
 
 def test_strips_trailing_api_segment():
@@ -108,6 +115,8 @@ def test_oauth_does_not_require_mcp_auth_token():
     assert s.oauth_audience == "https://mcp.example.com/mcp"
     assert s.oauth_jwks_uri == "https://tenant.logto.app/oidc/jwks"
     assert s.oauth_scopes == DEFAULT_OAUTH_SCOPES
+    assert s.mcp_http_allowed_origins == DEFAULT_OAUTH_HTTP_ALLOWED_ORIGINS
+    assert "https://chatgpt.com" in s.mcp_http_allowed_origins
 
 
 def test_oauth_ignores_unused_bearer_token():
@@ -174,3 +183,26 @@ def test_bearer_still_requires_token_when_mode_set():
     env = {k: v for k, v in REQUIRED.items() if k != "MCP_AUTH_TOKEN"}
     with pytest.raises(ConfigError, match="MCP_AUTH_TOKEN"):
         load_settings({**env, "MCP_AUTH_MODE": "bearer"})
+
+
+def test_http_allowed_origins_explicit_list():
+    s = load_settings({
+        **REQUIRED,
+        "MCP_HTTP_ALLOWED_ORIGINS": " https://chatgpt.com, https://chat.openai.com/ ",
+    })
+    assert s.mcp_http_allowed_origins == ("https://chatgpt.com", "https://chat.openai.com")
+
+
+def test_http_allowed_origins_alias_and_star():
+    s = load_settings({**REQUIRED, "ARCANE_MCP_HTTP_ALLOWED_ORIGINS": "*"})
+    assert s.mcp_http_allowed_origins == ("*",)
+
+
+def test_oauth_empty_origins_disables_cors_default():
+    s = load_settings({**OAUTH_REQUIRED, "MCP_HTTP_ALLOWED_ORIGINS": ""})
+    assert s.mcp_http_allowed_origins == ()
+
+
+def test_http_allowed_origins_rejects_path():
+    with pytest.raises(ConfigError, match="origins"):
+        load_settings({**REQUIRED, "MCP_HTTP_ALLOWED_ORIGINS": "https://chatgpt.com/mcp"})

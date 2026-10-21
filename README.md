@@ -101,6 +101,8 @@ docker run -d --name arcane-mcp --restart unless-stopped -p 8000:8000 \
 
 Point ChatGPT at `https://mcp.example.com/mcp`. It should receive 401 + PRM at `/.well-known/oauth-protected-resource/mcp`, then complete OIDC against Logto. `GET /health` stays unauthenticated in both modes.
 
+Browser clients (ChatGPT) send a CORS preflight `OPTIONS /mcp`. In oauth mode the HTTP app allows `https://chatgpt.com`, `https://chat.openai.com`, and `https://www.chatgpt.com` by default via `MCP_HTTP_ALLOWED_ORIGINS`. That list is reflected in `Access-Control-Allow-Origin`; `*` is not the default. Bearer mode adds no CORS headers unless you set the same variable.
+
 ## Configuration
 
 | Variable | Required | Default | Purpose |
@@ -114,6 +116,7 @@ Point ChatGPT at `https://mcp.example.com/mcp`. It should receive 401 + PRM at `
 | `OAUTH_AUDIENCE` | oauth | `{MCP_PUBLIC_BASE_URL}/mcp` | JWT `aud` / Logto API Resource indicator |
 | `OAUTH_SCOPES` | no | `mcp` | Required token scopes (comma-separated) |
 | `OAUTH_JWKS_URI` | no | `{issuer}/jwks` | JWKS override |
+| `MCP_HTTP_ALLOWED_ORIGINS` | no | ChatGPT origins in oauth; empty in bearer | Comma-separated browser origins for CORS on `/mcp` (alias `ARCANE_MCP_HTTP_ALLOWED_ORIGINS`). Empty disables CORS. Prefer an explicit list over `*` |
 | `MCP_HOST` | no | `0.0.0.0` | Bind address |
 | `MCP_PORT` | no | `8000` | Bind port |
 | `ARCANE_MCP_TAGS` | no | see `.env.example` | OpenAPI tags to expose |
@@ -137,7 +140,9 @@ Diagnostics, JobSchedules, Jobs, Uploads, Mobile Push, Application Images, Strea
 Intended for a LAN or an internal Docker network. If you expose it publicly, put TLS in front of it,
 keep the confirmation gate on, and consider `ARCANE_MCP_READ_ONLY=true` or a narrower tag list.
 `GET /health` is unauthenticated and reports only the tool count and Arcane URL. Public oauth mode
-needs a reachable `MCP_PUBLIC_BASE_URL` so clients can complete Logto discovery.
+needs a reachable `MCP_PUBLIC_BASE_URL` so clients can complete Logto discovery, and CORS origins
+that match the browser client (`MCP_HTTP_ALLOWED_ORIGINS`) so ChatGPT can finish MCP action discovery
+after OAuth.
 
 ## Development
 
