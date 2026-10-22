@@ -27,6 +27,7 @@ from arcane_mcp.config import (
     Settings,
     load_settings,
 )
+from arcane_mcp.logs import register_logs_tool
 from arcane_mcp.safety import ConfirmationMiddleware, ConfirmationStore, destructive_tool_names, register_confirm_tool
 from arcane_mcp.spec import SpecFetchError, build_component_fn, build_route_map_fn, fetch_spec, normalise_spec
 
@@ -35,7 +36,9 @@ logger = logging.getLogger(__name__)
 INSTRUCTIONS = (
     "Tools for managing Docker via Arcane. Most tools take an environment `id`; the local Docker host is "
     'environment "0" and remote agents have UUIDs (see list_environments). Destructive tools return '
-    "requires_confirmation=true with a token instead of executing; call confirm_operation(token) to proceed."
+    "requires_confirmation=true with a token instead of executing; call confirm_operation(token) to proceed. "
+    "get_container_logs is read-only and returns a capped tail of a container's logs "
+    "(default 200 lines and 128KB; hard caps 2000 lines and 512KB)."
 )
 
 MCP_HTTP_PATH = "/mcp"
@@ -271,6 +274,8 @@ def build_server(
     )
     if store is not None:
         register_confirm_tool(mcp, store)
+    if settings.enable_logs:
+        register_logs_tool(mcp, client)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_: Request) -> JSONResponse:

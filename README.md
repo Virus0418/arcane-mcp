@@ -57,10 +57,27 @@ ChatGPT and other OAuth MCP clients should use **oauth** mode (below) instead of
 ## How it works
 
 1. On boot the server fetches `ARCANE_BASE_URL/api/openapi.json`, retrying for `ARCANE_MCP_SPEC_TIMEOUT` seconds and exiting non-zero if Arcane never answers (Docker restarts it).
-2. Operations whose tag is in `ARCANE_MCP_TAGS` become tools named after their `operationId` in snake_case (`list_containers`, `start_container`, `list_environments`, ...). Streaming and binary-download endpoints are always excluded.
+2. Operations whose tag is in `ARCANE_MCP_TAGS` become tools named after their `operationId` in snake_case (`list_containers`, `start_container`, `list_environments`, ...). Streaming and binary-download endpoints, including `/logs/download`, are always excluded from that generation.
 3. Every tool call is proxied to Arcane with your `X-API-Key`.
 
 Most tools take an environment `id`. The local Docker host is `"0"`; remote agents have UUIDs (`list_environments`).
+
+`get_container_logs` is hand-written rather than generated. See [Container logs](#container-logs).
+
+## Container logs
+
+`get_container_logs` reads `GET /api/environments/{id}/containers/{containerId}/logs/download` (Arcane v2.12+, permission `containers:logs`) and returns a tail of the text file. That route has no `tail` query. It stays matched by the OpenAPI hard-exclude list, so auto-generation never registers `download_container_logs` and never streams the attachment into the client.
+
+The tool streams the body and keeps a ring of the most recent lines. Older lines are dropped as soon as `tail` or `max_bytes` is exceeded, so the whole file is not buffered and then sliced. Invalid UTF-8 bytes are replaced. The Arcane request uses a 30 second HTTP timeout.
+
+| Argument | Default | Limit |
+|---|---|---|
+| `id` | | Environment id (`"0"` local, UUID for an edge agent) |
+| `containerId` | | Container id or name |
+| `tail` | `200` | Clamped to 1..2000 lines |
+| `max_bytes` | `131072` (128 KiB) | Hard cap `524288` (512 KiB) |
+
+The result is JSON: `success`, `truncated`, `lines`, `bytes`, `content`, and `note` when output was truncated. `truncated` is true when older lines were dropped to satisfy `tail` or `max_bytes`. The tool is read-only and is not behind `confirm_operation`. Set `ARCANE_MCP_ENABLE_LOGS=false` to skip registering it.
 
 ## Safety
 
@@ -124,11 +141,12 @@ Browser clients (ChatGPT) send a CORS preflight `OPTIONS /mcp`. In oauth mode th
 | `ARCANE_MCP_EXCLUDE_TAGS` | no | | Tags to hide even if allowed |
 | `ARCANE_MCP_READ_ONLY` | no | `false` | Expose only GET operations |
 | `ARCANE_MCP_CONFIRM_DESTRUCTIVE` | no | `true` | Two-step confirmation gate |
+| `ARCANE_MCP_ENABLE_LOGS` | no | `true` | Register hand-written `get_container_logs` (read-only tail; does not un-exclude `/logs/download`) |
 | `ARCANE_MCP_DESTRUCTIVE_PATTERNS` | no | | Extra regexes matched against paths |
 | `ARCANE_MCP_SPEC_TIMEOUT` | no | `60` | Seconds to retry the spec fetch |
 | `ARCANE_MCP_LOG_LEVEL` | no | `INFO` | Log level |
 
-With the default tags, Arcane 2.12 yields 137 generated tools plus `confirm_operation`.
+With the default tags, Arcane 2.12 yields 137 generated tools plus `confirm_operation` and `get_container_logs`.
 
 Available tags in Arcane 2.12: Containers, Images, Volumes, Networks, Projects, Project Workspace, Environments, System,
 Dashboard, Activities, Events, Ports, Updater, Image Updates, Vulnerabilities, Health, Version, Swarm, GitOps Syncs,
