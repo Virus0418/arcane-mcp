@@ -46,9 +46,9 @@ async def test_tool_inventory(server):
     mcp, _ = server
     async with Client(mcp) as c:
         tools = {t.name: t for t in await c.list_tools()}
-    assert len(tools) == GENERATED_TOOL_COUNT + 1, sorted(tools)
+    assert len(tools) == GENERATED_TOOL_COUNT + 2, sorted(tools)  # confirm_operation + get_container_logs
     for name in ["list_containers", "start_container", "delete_container", "list_images", "prune_images",
-                 "list_environments", "get_dashboard", "get_version", CONFIRM_TOOL_NAME]:
+                 "list_environments", "get_dashboard", "get_version", CONFIRM_TOOL_NAME, "get_container_logs"]:
         assert name in tools, name
     assert not any(n.startswith(("list_users", "create_user", "login")) for n in tools)
     assert "download_container_logs" not in tools
@@ -90,7 +90,8 @@ async def test_confirmation_disabled_omits_confirm_tool(spec):
     async with Client(build_server(settings, spec, mock_client([]))) as c:
         names = {t.name for t in await c.list_tools()}
     assert CONFIRM_TOOL_NAME not in names
-    assert len(names) == GENERATED_TOOL_COUNT
+    assert "get_container_logs" in names
+    assert len(names) == GENERATED_TOOL_COUNT + 1
 
 
 async def test_read_only_has_only_get_tools(spec):
@@ -124,7 +125,7 @@ async def test_health_route_and_bearer_auth(server):
             health = await http.get("/health")
             assert health.status_code == 200
             assert health.json()["status"] == "ok"
-            assert health.json()["tools"] == GENERATED_TOOL_COUNT + 1
+            assert health.json()["tools"] == GENERATED_TOOL_COUNT + 2
 
             init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                 "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}

@@ -60,6 +60,7 @@ class Settings:
     exclude_tags: frozenset[str] = frozenset()
     read_only: bool = False
     confirm_destructive: bool = True
+    enable_logs: bool = True
     destructive_patterns: tuple[str, ...] = ()
     spec_timeout: float = 60.0
     log_level: str = "INFO"
@@ -248,6 +249,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         exclude_tags=frozenset(_csv(env, "ARCANE_MCP_EXCLUDE_TAGS")),
         read_only=_bool(env, "ARCANE_MCP_READ_ONLY", False),
         confirm_destructive=_bool(env, "ARCANE_MCP_CONFIRM_DESTRUCTIVE", True),
+        enable_logs=_bool(env, "ARCANE_MCP_ENABLE_LOGS", True),
         destructive_patterns=_csv(env, "ARCANE_MCP_DESTRUCTIVE_PATTERNS"),
         spec_timeout=float(_number(env, "ARCANE_MCP_SPEC_TIMEOUT", 60.0, float)),
         log_level=(env.get("ARCANE_MCP_LOG_LEVEL", "").strip() or "INFO").upper(),

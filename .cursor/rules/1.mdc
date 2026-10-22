@@ -1,0 +1,33 @@
+---
+description: Arcane MCP 项目规则与优化记录
+alwaysApply: true
+---
+
+# 项目概况
+
+arcane-mcp 是可容器化的 MCP 服务。启动时拉取 Arcane 的 OpenAPI，把容器、镜像、卷、网络、Compose 项目、环境与系统等接口生成 Streamable HTTP 工具。破坏性操作默认要二次确认（`confirm_operation`）。
+
+# 核心结构
+
+- `src/arcane_mcp/server.py`：组装 FastMCP、Arcane httpx 客户端、鉴权与 `/health`
+- `src/arcane_mcp/spec.py`：拉取并过滤 OpenAPI；`HARD_EXCLUDE` 排除流式与二进制下载（含 `/logs/download`）
+- `src/arcane_mcp/safety.py`：破坏性工具分类与 `confirm_operation`
+- `src/arcane_mcp/logs.py`：手写只读工具 `get_container_logs`
+- `src/arcane_mcp/config.py`：环境变量
+- `tests/`：用 `tests/fixtures/openapi.json`（Arcane 2.12）和 `httpx2.MockTransport`，不要用 `pytest-httpx`
+
+# 开发规范
+
+- HTTP 客户端使用 `httpx2`（FastMCP 4 的 fork），不要换成 `httpx`
+- 工具名 snake_case；OpenAPI 生成逻辑与手写工具分开注册
+- 不把 `/logs/download` 从 `HARD_EXCLUDE` 中移除，避免整份日志附件进入 MCP 上下文
+- 破坏性路径继续走确认门；只读日志工具不要加入该名单
+- 改完用 `uv run pytest -q` 验证
+
+# 优化历史
+
+## get_container_logs
+
+- 目标：在不自动代理 `/logs/download` 的前提下，提供有行数和字节上限的容器日志尾部
+- 方法：`build_server` 在 OpenAPI provider 之后注册手写工具，复用带 `X-API-Key` 的 AsyncClient；流式读取，用 deque 只保留尾部行，超限即丢弃旧数据；`ARCANE_MCP_ENABLE_LOGS` 默认开启
+- 要点：默认 200 行 / 128KiB，硬上限 2000 行 / 512KiB；非法 UTF-8 替换；HTTP 超时 30 秒；结果含 `success`、`truncated`、`lines`、`bytes`、`content`，截断时附 `note`

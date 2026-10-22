@@ -38,6 +38,7 @@ def test_defaults():
     assert s.exclude_tags == frozenset()
     assert s.read_only is False
     assert s.confirm_destructive is True
+    assert s.enable_logs is True
     assert s.destructive_patterns == ()
     assert s.spec_timeout == 60.0
     assert s.log_level == "INFO"
@@ -94,6 +95,13 @@ def test_truthy_values(value):
 def test_bad_bool_raises():
     with pytest.raises(ConfigError):
         load_settings({**REQUIRED, "ARCANE_MCP_READ_ONLY": "maybe"})
+
+
+def test_enable_logs_defaults_true_and_can_disable():
+    assert load_settings(REQUIRED).enable_logs is True
+    assert load_settings({**REQUIRED, "ARCANE_MCP_ENABLE_LOGS": "false"}).enable_logs is False
+    with pytest.raises(ConfigError):
+        load_settings({**REQUIRED, "ARCANE_MCP_ENABLE_LOGS": "maybe"})
 
 
 def test_bad_port_raises():
