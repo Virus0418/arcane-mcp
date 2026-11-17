@@ -27,18 +27,35 @@ from arcane_mcp.config import (
     Settings,
     load_settings,
 )
-from arcane_mcp.logs import register_logs_tool
-from arcane_mcp.safety import ConfirmationMiddleware, ConfirmationStore, destructive_tool_names, register_confirm_tool
-from arcane_mcp.spec import SpecFetchError, build_component_fn, build_route_map_fn, fetch_spec, normalise_spec
+from arcane_mcp.logs import LOG_TOOL_NAME, container_logs_template, register_logs_tool
+from arcane_mcp.safety import (
+    DESTRUCTIVE_ACTIONS,
+    ConfirmationMiddleware,
+    ConfirmationStore,
+    destructive_tool_names,
+    register_confirm_tool,
+)
+from arcane_mcp.spec import (
+    SpecFetchError,
+    build_component_fn,
+    build_route_map_fn,
+    exposed_tool_names,
+    fetch_spec,
+    normalise_spec,
+)
 
 logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
     "Tools for managing Docker via Arcane. Most tools take an environment `id`; the local Docker host is "
-    'environment "0" and remote agents have UUIDs (see list_environments). Destructive tools return '
-    "requires_confirmation=true with a token instead of executing; call confirm_operation(token) to proceed. "
+    'environment "0" and remote agents have UUIDs (see list_environments). On Arcane 3, container lifecycle '
+    "is container_action and project lifecycle is project_action; both take a required query argument "
+    "`action`. Destructive calls, including action kill, down, restore, and restorefiles, return "
+    "requires_confirmation=true with a token bound to that exact request; call confirm_operation(token) "
+    "to proceed. A different action needs its own confirmation. "
     "get_container_logs is read-only and returns a capped tail of a container's logs "
-    "(default 200 lines and 128KB; hard caps 2000 lines and 512KB)."
+    "(default 200 lines and 128KB; hard caps 2000 lines and 512KB). Its URL follows the loaded spec "
+    "(/environments on Arcane 2.x, /agents on Arcane 3.x)."
 )
 
 MCP_HTTP_PATH = "/mcp"
@@ -244,7 +261,7 @@ def build_server(
     provider = OpenAPIProvider(
         normalised,
         client,
-        route_map_fn=build_route_map_fn(settings),
+        route_map_fn=build_route_map_fn(settings, normalised),
         mcp_component_fn=build_component_fn(),
         validate_output=False,
     )
@@ -254,8 +271,15 @@ def build_server(
     if settings.confirm_destructive:
         store = ConfirmationStore()
         destructive = destructive_tool_names(normalised, settings.destructive_patterns)
-        middleware.append(ConfirmationMiddleware(store, destructive))
-        logger.info("Confirmation gate active for %d destructive tools", len(destructive))
+        exposed = set(exposed_tool_names(normalised, settings))
+        if settings.enable_logs and container_logs_template(normalised):
+            exposed.add(LOG_TOOL_NAME)
+        middleware.append(ConfirmationMiddleware(store, destructive, exposed=frozenset(exposed)))
+        logger.info(
+            "Confirmation gate active for %d path-destructive tools; actions %s also require confirmation",
+            len(destructive),
+            ", ".join(sorted(DESTRUCTIVE_ACTIONS)),
+        )
 
     if auth is True:
         auth_provider: AuthProvider | None = make_auth_provider(settings)
@@ -275,7 +299,7 @@ def build_server(
     if store is not None:
         register_confirm_tool(mcp, store)
     if settings.enable_logs:
-        register_logs_tool(mcp, client)
+        register_logs_tool(mcp, client, normalised)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_: Request) -> JSONResponse:

@@ -7,6 +7,7 @@ from arcane_mcp.safety import (
     ConfirmationError,
     ConfirmationMiddleware,
     ConfirmationStore,
+    destructive_action,
     destructive_tool_names,
     is_destructive,
     register_confirm_tool,
@@ -191,3 +192,86 @@ async def test_confirm_tool_is_listed():
     async with Client(mcp) as c:
         names = {t.name for t in await c.list_tools()}
     assert CONFIRM_TOOL_NAME in names
+
+
+def test_destructive_action_matches_kill_down_and_restore_only():
+    assert destructive_action({"action": " Kill "}) == "kill"
+    assert destructive_action({"action": "DOWN"}) == "down"
+    assert destructive_action({"action": "restore"}) == "restore"
+    assert destructive_action({"action": "restoreFiles"}) == "restorefiles"
+    assert destructive_action({"action": "restore-files"}) == "restore-files"
+    assert destructive_action({"action": "start"}) is None
+    assert destructive_action({"action": "up"}) is None
+    assert destructive_action({"action": "stopall"}) is None
+    assert destructive_action({"action": 1}) is None
+    assert destructive_action({}) is None
+    assert destructive_action(None) is None
+
+
+def build_action_server(store: ConfirmationStore) -> tuple[FastMCP, list]:
+    calls: list = []
+    mcp = FastMCP("actions", middleware=[ConfirmationMiddleware(store, frozenset())])
+
+    @mcp.tool
+    def container_action(id: str, containerId: str, action: str) -> dict:
+        calls.append(("container", action))
+        return {"ran": action}
+
+    @mcp.tool
+    def project_action(id: str, projectId: str, action: str) -> dict:
+        calls.append(("project", action))
+        return {"ran": action}
+
+    register_confirm_tool(mcp, store)
+    return mcp, calls
+
+
+async def test_action_token_is_bound_to_the_original_request():
+    store, _ = make_store()
+    mcp, calls = build_action_server(store)
+    async with Client(mcp) as c:
+        started = await c.call_tool(
+            "container_action", {"id": "0", "containerId": "abc", "action": "start"}
+        )
+        assert started.structured_content == {"ran": "start"}
+        kill = await c.call_tool(
+            "container_action", {"id": "0", "containerId": "abc", "action": "Kill"}
+        )
+        body = kill.structured_content
+        assert body["requires_confirmation"] is True
+        assert body["action"] == "kill"
+        assert body["arguments"] == {"id": "0", "containerId": "abc", "action": "Kill"}
+        down = await c.call_tool(
+            "project_action", {"id": "0", "projectId": "web", "action": "down"}
+        )
+        assert down.structured_content["arguments"]["action"] == "down"
+        assert calls == [("container", "start")]
+        confirmed = await c.call_tool(CONFIRM_TOOL_NAME, {"token": body["token"]})
+        assert confirmed.structured_content == {"ran": "Kill"}
+        confirmed_down = await c.call_tool(
+            CONFIRM_TOOL_NAME, {"token": down.structured_content["token"]}
+        )
+        assert confirmed_down.structured_content == {"ran": "down"}
+    assert calls == [("container", "start"), ("container", "Kill"), ("project", "down")]
+
+
+async def test_hidden_tool_is_not_offered_a_confirmation_token():
+    store, _ = make_store()
+    mcp = FastMCP(
+        "hidden",
+        middleware=[ConfirmationMiddleware(store, frozenset({"delete_thing"}), exposed=frozenset({"list_things"}))],
+    )
+
+    @mcp.tool
+    def list_things() -> dict:
+        return {"things": []}
+
+    register_confirm_tool(mcp, store)
+    async with Client(mcp) as client:
+        listed = await client.call_tool("list_things", {})
+        assert listed.structured_content == {"things": []}
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("container_action", {"id": "0", "containerId": "abc", "action": "kill"})
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("delete_thing", {"name": "web"})
+    assert store.pending_count() == 0

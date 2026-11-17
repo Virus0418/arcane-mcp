@@ -16,7 +16,9 @@ from arcane_mcp.logs import (
     LOG_TOOL_NAME,
     MAX_TAIL,
     LogTailBuffer,
+    container_logs_template,
     read_log_tail,
+    render_logs_path,
 )
 from arcane_mcp.safety import CONFIRM_TOOL_NAME, destructive_tool_names
 from arcane_mcp.server import build_server
@@ -305,3 +307,23 @@ async def test_arcane_http_error_and_timeout(spec):
 async def test_container_id_is_a_single_path_segment(spec):
     _result, seen = await _call(spec, b"ok\n", {"id": "0", "containerId": "foo/bar"})
     assert seen["path"] == "/api/environments/0/containers/foo%2Fbar/logs/download"
+
+
+def test_container_logs_template_follows_the_loaded_spec():
+    environments = "/environments/{id}/containers/{containerId}/logs/download"
+    agents = "/agents/{id}/containers/{containerId}/logs/download"
+    operation = {"get": {"operationId": "download-container-logs"}}
+    v2 = {"info": {"version": "2.17.2"}, "paths": {environments: operation}}
+    v3 = {"info": {"version": "3.0.1"}, "paths": {agents: operation}}
+    both = {environments: operation, agents: operation}
+    assert container_logs_template(v2) == environments
+    assert container_logs_template(v3) == agents
+    assert container_logs_template({"info": {"version": "2.17.2"}, "paths": both}) == environments
+    assert container_logs_template({"info": {"version": "3.0.1"}, "paths": both}) == agents
+    assert container_logs_template({"paths": {environments: {"get": {"operationId": "other"}}}}) == environments
+    assert container_logs_template({"paths": {}}) is None
+    assert render_logs_path(agents, "0", "foo/bar") == "/agents/0/containers/foo%2Fbar/logs/download"
+
+
+def test_arcane_2_fixture_selects_environments_logs(spec):
+    assert container_logs_template(spec) == "/environments/{id}/containers/{containerId}/logs/download"

@@ -10,11 +10,11 @@ arcane-mcp 是可容器化的 MCP 服务。启动时拉取 Arcane 的 OpenAPI，
 # 核心结构
 
 - `src/arcane_mcp/server.py`：组装 FastMCP、Arcane httpx 客户端、鉴权与 `/health`
-- `src/arcane_mcp/spec.py`：拉取并过滤 OpenAPI；`HARD_EXCLUDE` 排除流式与二进制下载（含 `/logs/download`）
+- `src/arcane_mcp/spec.py`：拉取并过滤 OpenAPI；`HARD_EXCLUDE` 排除流式路径与二进制下载（含 `/logs/download`）；成功响应为 `text/event-stream` 等流式媒体类型的操作另行排除
 - `src/arcane_mcp/safety.py`：破坏性工具分类与 `confirm_operation`
 - `src/arcane_mcp/logs.py`：手写只读工具 `get_container_logs`
 - `src/arcane_mcp/config.py`：环境变量
-- `tests/`：用 `tests/fixtures/openapi.json`（Arcane 2.12）和 `httpx2.MockTransport`，不要用 `pytest-httpx`
+- `tests/`：用 `tests/fixtures/openapi.json`（Arcane 2.12）、`tests/fixtures/openapi-v3.0.1.json`（官方 Arcane 3.0.1 导出）和 `httpx2.MockTransport`，不要用 `pytest-httpx`
 
 # 开发规范
 
@@ -31,3 +31,9 @@ arcane-mcp 是可容器化的 MCP 服务。启动时拉取 Arcane 的 OpenAPI，
 - 目标：在不自动代理 `/logs/download` 的前提下，提供有行数和字节上限的容器日志尾部
 - 方法：`build_server` 在 OpenAPI provider 之后注册手写工具，复用带 `X-API-Key` 的 AsyncClient；流式读取，用 deque 只保留尾部行，超限即丢弃旧数据；`ARCANE_MCP_ENABLE_LOGS` 默认开启
 - 要点：默认 200 行 / 128KiB，硬上限 2000 行 / 512KiB；非法 UTF-8 替换；HTTP 超时 30 秒；结果含 `success`、`truncated`、`lines`、`bytes`、`content`，截断时附 `note`
+
+## Arcane 3.0.1 兼容
+
+- 目标：同一进程按已加载的 OpenAPI 同时服务 Arcane 2.x（`/environments`）和 3.x（`/agents`），不把现有 2.17.2 切死到 `/agents`
+- 方法：`get_container_logs` 按 `download-container-logs` 选路径；确认门在原路径规则之外识别 `action` 为 kill/down/restore/restorefiles/restore-files，token 只重放当时的参数，且只拦截 route map 实际暴露的工具；`text/event-stream` 等成功响应媒体类型从 route map 排除，不单靠路径含 `/stream`
+- 要点：默认使用 v3 原生工具名，不为 29 个消失工具做别名，也不伪造 5 个没有等价契约的接口；`deploy_project` 的 `action` 必填；`update_project`、`update_environment`、`create_volume`、`ignore_vulnerability` 的环境 id 是 `id__path`；官方 v3 fixture 来自 `arcane openapi -f json`（v3.0.1，`c614e0d2`）；默认标签下工具数为 131（修复前审计的 132 含 `stream_upgrade_progress`）

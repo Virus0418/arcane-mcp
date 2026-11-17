@@ -57,7 +57,7 @@ ChatGPT and other OAuth MCP clients should use **oauth** mode (below) instead of
 ## How it works
 
 1. On boot the server fetches `ARCANE_BASE_URL/api/openapi.json`, retrying for `ARCANE_MCP_SPEC_TIMEOUT` seconds and exiting non-zero if Arcane never answers (Docker restarts it).
-2. Operations whose tag is in `ARCANE_MCP_TAGS` become tools named after their `operationId` in snake_case (`list_containers`, `start_container`, `list_environments`, ...). Streaming and binary-download endpoints, including `/logs/download`, are always excluded from that generation.
+2. Operations whose tag is in `ARCANE_MCP_TAGS` become tools named after their `operationId` in snake_case (`list_containers`, `container_action`, `list_environments`, ...). Paths matching `/stream`, `/logs/download`, `/export`, `/download`, `/attestations`, `/upload`, or `/app-images/` are always excluded. A success response of `text/event-stream` (or another unsupported stream such as `application/x-ndjson`) is excluded too, even when the path does not contain `/stream`. That drops Arcane 3 `stream_upgrade_progress` (`GET /agents/{id}/system/upgrade/progress`). JSON tools stay.
 3. Every tool call is proxied to Arcane with your `X-API-Key`.
 
 Most tools take an environment `id`. The local Docker host is `"0"`; remote agents have UUIDs (`list_environments`).
@@ -66,7 +66,7 @@ Most tools take an environment `id`. The local Docker host is `"0"`; remote agen
 
 ## Container logs
 
-`get_container_logs` reads `GET /api/environments/{id}/containers/{containerId}/logs/download` (Arcane v2.12+, permission `containers:logs`) and returns a tail of the text file. That route has no `tail` query. It stays matched by the OpenAPI hard-exclude list, so auto-generation never registers `download_container_logs` and never streams the attachment into the client.
+`get_container_logs` reads the container log download named in the loaded spec (permission `containers:logs`) and returns a tail of the text file. Arcane 2.x is `GET /api/environments/{id}/containers/{containerId}/logs/download`. Arcane 3.x is `GET /api/agents/{id}/containers/{containerId}/logs/download`. The operation id is still `download-container-logs`. If a spec contains both templates, major version 3 selects `/agents` and every other version keeps `/environments`, so an Arcane 2.17 server is not pointed at `/agents`. The route has no `tail` query. It stays matched by the OpenAPI hard-exclude list, so auto-generation never registers `download_container_logs` and never streams the attachment into the client.
 
 The tool streams the body and keeps a ring of the most recent lines. Older lines are dropped as soon as `tail` or `max_bytes` is exceeded, so the whole file is not buffered and then sliced. Invalid UTF-8 bytes are replaced. The Arcane request uses a 30 second HTTP timeout.
 
@@ -81,8 +81,9 @@ The result is JSON: `success`, `truncated`, `lines`, `bytes`, `content`, and `no
 
 ## Safety
 
-Destructive operations (any `DELETE`, plus paths ending in `prune`, `destroy`, `kill`, `down`, `restore`, `restore-files`)
-do not execute on the first call. They return:
+Destructive operations do not execute on the first call. That is any `DELETE`, any path ending in `prune`, `destroy`, `kill`, `down`, `restore`, or `restore-files`, and any call whose `action` argument is `kill`, `down`, `restore`, `restorefiles`, or `restore-files` (comparison ignores case and surrounding space). Arcane 3 uses the action form for container `kill`, project `down`, and non-default backup `restore` / `restorefiles`. `start`, `stop`, `restart`, `pause`, `unpause`, and deploy `up` / `redeploy` / `pull` are not gated.
+
+The token stores the tool name and the exact arguments. `confirm_operation` replays that request and has no `action` parameter, so a kill token cannot be turned into start or down. A different action needs its own token. The gate only does this for tools the route map actually exposed. `ARCANE_MCP_READ_ONLY=true` drops non-GET operations, and calling `container_action` with `action=kill` on that server is an unknown tool rather than a confirmation prompt that could be replayed. They return:
 
 ```json
 {"requires_confirmation": true, "token": "3f9a...", "expires_in": 120, "operation": "delete_container", "arguments": {}}
@@ -146,7 +147,60 @@ Browser clients (ChatGPT) send a CORS preflight `OPTIONS /mcp`. In oauth mode th
 | `ARCANE_MCP_SPEC_TIMEOUT` | no | `60` | Seconds to retry the spec fetch |
 | `ARCANE_MCP_LOG_LEVEL` | no | `INFO` | Log level |
 
-With the default tags, Arcane 2.12 yields 137 generated tools plus `confirm_operation` and `get_container_logs`.
+With the default tags, Arcane 2.12 yields 137 generated tools plus `confirm_operation` and `get_container_logs` (139). Arcane 3.0.1 yields 131 tools with the same settings: 129 generated tools, plus the same two hand-written tools. A pre-fix load of that spec produced 132 because it still exposed `stream_upgrade_progress`; the media-type filter removes that one SSE tool and does not remove the JSON tools.
+
+## Arcane 3.0
+
+Tool names and arguments follow the live spec. There is no compatibility alias layer. Restarting against Arcane 3 is enough for path and method changes that FastMCP generates. The hand-written log path, the action confirmation gate, and the event-stream filter are in this server so a 2.x spec and a 3.x spec can both be served without a config change.
+
+`deploy_project` is `POST /agents/{id}/projects/{projectId}/deploy` and **`action` is required**: `up`, `redeploy`, or `pull`. `up` is the old deploy. `redeploy` replaces `redeploy_project`. `pull` replaces `pull_project_images`.
+
+These four tools take the environment id as `id__path`. FastMCP renames the path parameter because the JSON body also has `id`. Passing the old `id` argument writes it into the body and leaves `{id}` in the URL. This server does not wrap or rename them.
+
+| Tool | `id__path` | body `id` |
+|---|---|---|
+| `update_project` | environment id | project id |
+| `update_environment` | environment id | environment id in the body |
+| `create_volume` | environment id | volume id |
+| `ignore_vulnerability` | environment id | ignored-vulnerability id |
+
+### Tools that disappear on Arcane 3
+
+Twenty-nine default tools from the 2.x surface are gone. Twenty-four have a v3 successor. Five do not, and this server does not invent a stand-in for them.
+
+| Arcane 2 tool | Arcane 3 call |
+|---|---|
+| `start_container` | `container_action` `action=start` |
+| `stop_container` | `container_action` `action=stop` |
+| `restart_container` | `container_action` `action=restart` |
+| `kill_container` | `container_action` `action=kill` (confirmation required) |
+| `pause_container` | `container_action` `action=pause` |
+| `unpause_container` | `container_action` `action=unpause` |
+| `down_project` | `project_action` `action=down` (confirmation required) |
+| `restart_project` | `project_action` `action=restart` |
+| `archive_project` | `project_action` `action=archive` |
+| `unarchive_project` | `project_action` `action=unarchive` |
+| `update_project_services` | `project_action` `action=updateservices` |
+| `pull_project_images` | `deploy_project` `action=pull` |
+| `redeploy_project` | `deploy_project` `action=redeploy` |
+| `connect_network_container` | `network_container_action` `action=connect` |
+| `disconnect_network_container` | `network_container_action` `action=disconnect` |
+| `cancel_activity` | `activity_action` `action=cancel` |
+| `check_all_images` | `check_images` `action=all` |
+| `check_multiple_images` | `check_images` `action=batch` |
+| `start_all_containers` | `system_containers_action` `action=startall` |
+| `start_all_stopped_containers` | `system_containers_action` `action=startstopped` |
+| `stop_all_containers` | `system_containers_action` `action=stopall` |
+| `bulk_ignore_vulnerabilities` | `bulk_ignored_vulnerabilities_action` `action=ignore` |
+| `bulk_unignore_vulnerabilities` | `bulk_ignored_vulnerabilities_action` `action=unignore` |
+| `download_edge_mtlsca` | `download_agent_mtlsca` |
+| `get_dashboard` | removed, no equivalent |
+| `pair_agent` | removed, no equivalent (`enroll_agent` is tag Enrollment and is not a replacement) |
+| `update_heartbeat` | removed, no equivalent |
+| `trigger_update_all` | removed, no equivalent (`start_upgrade_job` is a different contract) |
+| `update_all_status` | removed, no equivalent (`get_current_upgrade_job` is a different contract) |
+
+`list_environments` keeps its name. Its URL becomes `GET /agents`. `get_container_logs` keeps its name and selects `/agents` from a 3.x spec.
 
 Available tags in Arcane 2.12: Containers, Images, Volumes, Networks, Projects, Project Workspace, Environments, System,
 Dashboard, Activities, Events, Ports, Updater, Image Updates, Vulnerabilities, Health, Version, Swarm, GitOps Syncs,
@@ -170,7 +224,7 @@ uv sync --extra dev
 uv run pytest -q
 ```
 
-Tests run against a committed snapshot of the Arcane 2.12.0 spec in `tests/fixtures/openapi.json` with a mocked Arcane backend.
+Tests run against committed OpenAPI snapshots with a mocked Arcane backend (`httpx2.MockTransport`). `tests/fixtures/openapi.json` is Arcane 2.12.0. `tests/fixtures/openapi-v3.0.1.json` is the official Arcane 3.0.1 export from `getarcaneapp/arcane` release `v3.0.1` (`c614e0d2df6d6bcb6188c1af249f457000c7e96c`), command `arcane openapi -f json` on `arcane_linux_amd64`. SHA-256 `a2381f0425261e73b0a5d87b30d3eee12d62e27a8713de6edbddbd9b49d61013`. It is not a hand-written document.
 
 ## Credits
 
