@@ -28,17 +28,7 @@ HARD_MAX_BYTES = 524_288
 LOG_TIMEOUT_SECONDS = 30.0
 _CHUNK_SIZE = 8192
 
-_DESCRIPTION = (
-    "Return the tail of a container's Docker-retained logs. Read-only. "
-    "Arcane's log download has no tail query, so this streams "
-    "GET /environments/{id}/containers/{containerId}/logs/download and keeps only the most recent lines. "
-    'id is the environment ("0" for local Docker, or an edge UUID). '
-    "containerId is the container id or name. "
-    f"tail defaults to {DEFAULT_TAIL} and is clamped to 1..{MAX_TAIL}. "
-    f"max_bytes defaults to {DEFAULT_MAX_BYTES} and is hard-capped at {HARD_MAX_BYTES}. "
-    "The result includes success, truncated, lines, bytes, and content, plus note when truncated. "
-    "Requires Arcane permission containers:logs. Does not follow the log stream."
-)
+_LOG_OPERATION_ID = "download-container-logs"
 
 _OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -199,16 +189,77 @@ async def read_log_tail(chunks: AsyncIterator[bytes], *, tail: int, max_bytes: i
     return buffer.as_dict()
 
 
-def _logs_path(environment_id: str, container_id: str) -> str:
+def _is_container_log_download(path: str, operation: dict[str, Any]) -> bool:
+    if operation.get("operationId") == _LOG_OPERATION_ID:
+        return True
+    return path.endswith("/logs/download") and "/containers/" in path and "{containerId}" in path
+
+
+def container_logs_template(spec: dict[str, Any] | None) -> str | None:
+    """Path template for the container log download in this spec.
+
+    Arcane 2.x exposes ``/environments/{id}/containers/{containerId}/logs/download``.
+    Arcane 3.x exposes the same operation under ``/agents/...``. A spec that
+    contains only one of them selects that path. If both are present, major
+    version 3 selects ``/agents`` and every other version keeps ``/environments``
+    so a 2.x server is not switched onto a path it does not serve.
+    """
+    if not spec:
+        return None
+    matches: list[str] = []
+    for path, path_item in spec.get("paths", {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method.lower() != "get" or not isinstance(operation, dict):
+                continue
+            if _is_container_log_download(path, operation) and path not in matches:
+                matches.append(path)
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    version = str((spec.get("info") or {}).get("version") or "")
+    major = version.split(".", 1)[0]
+    if major == "3":
+        agents = [path for path in matches if "/agents/" in path]
+        if agents:
+            return agents[0]
+    environments = [path for path in matches if "/environments/" in path]
+    if environments:
+        return environments[0]
+    return matches[0]
+
+
+def render_logs_path(template: str, environment_id: str, container_id: str) -> str:
+    rendered = template.replace("{id}", quote(environment_id, safe="")).replace(
+        "{containerId}", quote(container_id, safe="")
+    )
+    if "{" in rendered or "}" in rendered:
+        raise ToolError(f"Log download path template could not be filled: {template}")
+    return rendered
+
+
+def logs_tool_description(template: str) -> str:
     return (
-        f"/environments/{quote(environment_id, safe='')}"
-        f"/containers/{quote(container_id, safe='')}/logs/download"
+        "Return the tail of a container's Docker-retained logs. Read-only. "
+        "Arcane's log download has no tail query, so this streams "
+        f"GET {template} and keeps only the most recent lines. "
+        "The path is taken from the loaded OpenAPI spec: Arcane 2.x uses /environments "
+        "and Arcane 3.x uses /agents. "
+        'id is the environment ("0" for local Docker, or an agent UUID). '
+        "containerId is the container id or name. "
+        f"tail defaults to {DEFAULT_TAIL} and is clamped to 1..{MAX_TAIL}. "
+        f"max_bytes defaults to {DEFAULT_MAX_BYTES} and is hard-capped at {HARD_MAX_BYTES}. "
+        "The result includes success, truncated, lines, bytes, and content, plus note when truncated. "
+        "Requires Arcane permission containers:logs. Does not follow the log stream."
     )
 
 
 async def fetch_container_logs(
     client: httpx2.AsyncClient,
     *,
+    path_template: str,
     environment_id: str,
     container_id: str,
     tail: int = DEFAULT_TAIL,
@@ -220,10 +271,11 @@ async def fetch_container_logs(
         raise ToolError("id and containerId are required")
     tail_n = _clamp_tail(tail)
     byte_cap = _clamp_max_bytes(max_bytes)
+    path = render_logs_path(path_template, environment_id, container_id)
     try:
         async with client.stream(
             "GET",
-            _logs_path(environment_id, container_id),
+            path,
             headers={"Accept": "text/plain"},
             timeout=LOG_TIMEOUT_SECONDS,
         ) as response:
@@ -260,10 +312,16 @@ async def fetch_container_logs(
     return result
 
 
-def register_logs_tool(mcp: FastMCP, client: httpx2.AsyncClient) -> None:
+def register_logs_tool(mcp: FastMCP, client: httpx2.AsyncClient, spec: dict[str, Any]) -> None:
+    template = container_logs_template(spec)
+    if template is None:
+        logger.warning("OpenAPI spec has no container log download; not registering %s", LOG_TOOL_NAME)
+        return
+    logger.info("Container logs tool will GET %s", template)
+
     @mcp.tool(
         name=LOG_TOOL_NAME,
-        description=_DESCRIPTION,
+        description=logs_tool_description(template),
         annotations={
             "title": "Get container logs",
             "read_only_hint": True,
@@ -280,6 +338,7 @@ def register_logs_tool(mcp: FastMCP, client: httpx2.AsyncClient) -> None:
     ) -> dict[str, Any]:
         return await fetch_container_logs(
             client,
+            path_template=template,
             environment_id=id,
             container_id=containerId,
             tail=tail,

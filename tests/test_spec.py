@@ -14,6 +14,7 @@ from arcane_mcp.spec import (
     build_route_map_fn,
     fetch_spec,
     normalise_spec,
+    streaming_route_keys,
     tool_name,
 )
 
@@ -153,3 +154,78 @@ async def test_fetch_spec_requests_openapi_path(make_arcane_client):
 
     await fetch_spec(make_arcane_client(handler), timeout=5)
     assert seen == ["http://arcane.test/api/openapi.json"]
+
+
+def test_route_map_excludes_event_stream_by_media_type():
+    """SSE is excluded from the response media type, including paths that do not contain /stream."""
+    fn = build_route_map_fn(load_settings(BASE_ENV))
+    progress = "/agents/{id}/system/upgrade/progress"
+    assert HARD_EXCLUDE.search(progress) is None
+    streamed = SimpleNamespace(
+        method="GET",
+        path=progress,
+        tags=["System"],
+        operation_id="stream-upgrade-progress",
+        responses={
+            "200": SimpleNamespace(
+                content_schema={"text/event-stream": {}, "application/problem+json": {}}
+            )
+        },
+    )
+    charset = SimpleNamespace(
+        method="GET",
+        path="/agents/{id}/events/live",
+        tags=["Events"],
+        operation_id="live-events",
+        responses={"200": SimpleNamespace(content_schema={"text/event-stream; charset=utf-8": {}})},
+    )
+    ndjson = SimpleNamespace(
+        method="GET",
+        path="/agents/{id}/events",
+        tags=["Events"],
+        operation_id="events-ndjson",
+        responses={"200": SimpleNamespace(content_schema={"application/x-ndjson": {}})},
+    )
+    json_route = SimpleNamespace(
+        method="GET",
+        path="/agents/{id}/containers",
+        tags=["Containers"],
+        operation_id="list-containers",
+        responses={"200": SimpleNamespace(content_schema={"application/json": {}, "application/problem+json": {}})},
+    )
+    assert fn(streamed, MCPType.TOOL) is MCPType.EXCLUDE
+    assert fn(charset, MCPType.TOOL) is MCPType.EXCLUDE
+    assert fn(ndjson, MCPType.TOOL) is MCPType.EXCLUDE
+    assert fn(json_route, MCPType.TOOL) is MCPType.TOOL
+
+
+def test_route_map_excludes_streaming_refs_from_the_raw_spec():
+    spec = {
+        "paths": {
+            "/events": {
+                "get": {
+                    "operationId": "watch",
+                    "tags": ["System"],
+                    "responses": {"200": {"$ref": "#/components/responses/Stream"}},
+                }
+            },
+            "/status": {
+                "get": {
+                    "operationId": "status",
+                    "tags": ["System"],
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                }
+            },
+        },
+        "components": {
+            "responses": {
+                "Stream": {"description": "sse", "content": {"text/event-stream": {"schema": {"type": "string"}}}}
+            }
+        },
+    }
+    assert streaming_route_keys(spec) == frozenset({("GET", "/events")})
+    fn = build_route_map_fn(load_settings(BASE_ENV), spec)
+    watched = SimpleNamespace(method="GET", path="/events", tags=["System"], operation_id="watch", responses={})
+    kept = SimpleNamespace(method="GET", path="/status", tags=["System"], operation_id="status", responses={})
+    assert fn(watched, MCPType.TOOL) is MCPType.EXCLUDE
+    assert fn(kept, MCPType.TOOL) is MCPType.TOOL
